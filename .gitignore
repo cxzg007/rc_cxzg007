@@ -1,0 +1,8 @@
+/target/
+/.local/
+/.env
+/.DS_Store
+*.ics
+/AI Coding 作业.pdf
+/.codegraph-joycode/
+/docs/superpowers/

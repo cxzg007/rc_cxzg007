@@ -1,0 +1,28 @@
+name: verify
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: notification_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: integration-test-password
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres -d notification_test"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      TEST_DB_URL: jdbc:postgresql://127.0.0.1:5432/notification_test
+      TEST_DB_USER: postgres
+      TEST_DB_PASSWORD: integration-test-password
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      - run: bash scripts/verify.sh
