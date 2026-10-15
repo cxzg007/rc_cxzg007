@@ -60,4 +60,10 @@ python3 scripts/verify_storage_outage.py
 
 本次正式副本验证包含 36 个文件，并注入无效的 PGHOSTADDR 和 PGSERVICE 以复验隔离。2026-10-14 的较早副本还包含 3 份过程草案，因此当时文件数为 39。本次复验后仅补充文档中的验证结果。正式文档的 18 处本地链接均可解析，`git diff --check` 通过。
 
-未在真实供应商或 Docker Compose 环境执行。GitHub 托管 CI 使用仓库中的 `verify` 工作流，推送后的执行结果单独记录，不由本地结果替代。生产负载、长期运行和数据库灾难恢复不在本次验证范围。
+## GitHub 托管 CI
+
+2026-10-15，提交 `82c02f58a8386cc1d08f090486fe24ee0d02a70d` 的 [verify 工作流](https://github.com/cxzg007/rc_cxzg007/actions/runs/38704151052) 执行成功。环境为 GitHub Ubuntu runner、Temurin JDK 17 和 PostgreSQL 17 service container，实际执行 `bash scripts/verify.sh`。
+
+云端日志确认：16 项单元测试、21 项集成测试全部通过，0 失败、0 错误、0 跳过；Maven 构建成功，打包应用输出 `packaged_app=passed`、`crash_recovery=passed`，观察到 2 次尝试和 2 次供应商接收。该工作流未执行独立的数据库断连脚本；数据库断连恢复依据上文的本地实验记录。
+
+未在真实供应商或 Docker Compose 环境执行；CI 中的 PostgreSQL service container 不等同于验证本项目的 Compose 启动路径。生产负载、长期运行和数据库灾难恢复不在本次验证范围。
