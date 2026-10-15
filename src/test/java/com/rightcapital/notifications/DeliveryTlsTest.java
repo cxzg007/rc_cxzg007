@@ -2,6 +2,8 @@ package com.rightcapital.notifications;
 
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import javax.net.ssl.*;
 import java.io.*;
 import java.net.*;
@@ -33,13 +35,39 @@ class DeliveryTlsTest {
     }
     private NotificationProperties properties(String origin) {
         return new NotificationProperties(Map.of("business", "key"), List.of(origin), false, 1, 20, Duration.ofHours(24),
-            Duration.ofSeconds(3), Duration.ofSeconds(10), Duration.ofSeconds(30), Duration.ofHours(1));
+            Duration.ofSeconds(3), Duration.ofSeconds(10), Duration.ofSeconds(30), Duration.ofHours(1), Duration.ofSeconds(5));
     }
     private NotificationRepository.Claim claim(String origin) {
         var now = Instant.now();
         var job = new NotificationRepository.Job(UUID.randomUUID(), "business", "tls-event", "", origin + "/", "GET", Map.of(), "", "pending", 0,
             now, now, now, null, null, null, null, null);
         return new NotificationRepository.Claim(job, UUID.randomUUID(), 1);
+    }
+    @ParameterizedTest
+    @ValueSource(ints = {47, 49, 50, 51, 109, 110})
+    void explicitProtocolOrAccessRejectionIsPermanent(int alert) throws Exception {
+        try (var server = new ServerSocket(0, 10, InetAddress.getByName("127.0.0.1"))) {
+            server.setSoTimeout(3000);
+            var pool = Executors.newSingleThreadExecutor();
+            try {
+                var supplier = pool.submit(() -> {
+                    try (var connection = server.accept()) {
+                        connection.setSoTimeout(3000);
+                        byte[] record = connection.getInputStream().readNBytes(5);
+                        int length = (Byte.toUnsignedInt(record[3]) << 8) | Byte.toUnsignedInt(record[4]);
+                        connection.getInputStream().readNBytes(length);
+                        connection.getOutputStream().write(new byte[]{21, 3, 3, 0, 2, 2, (byte) alert});
+                        connection.getOutputStream().flush();
+                    } catch (IOException ex) { throw new UncheckedIOException(ex); }
+                });
+                String origin = "https://127.0.0.1:" + server.getLocalPort();
+                var config = properties(origin);
+                var result = new DeliveryClient(HttpClient.newHttpClient(), new OriginPolicy(config), config).send(claim(origin));
+                assertFalse(result.retryable(), result.toString());
+                assertEquals("tls_validation_error", result.reason());
+                supplier.get(5, TimeUnit.SECONDS);
+            } finally { server.close(); pool.shutdownNow(); }
+        }
     }
     @Test void transientTlsAlertCanBeRetriedAndThenSucceedWithCertificateValidation() throws Exception {
         try (var server = new ServerSocket(0, 10, InetAddress.getByName("127.0.0.1"))) {

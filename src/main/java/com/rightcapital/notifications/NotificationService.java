@@ -20,21 +20,24 @@ public class NotificationService {
         this.repository = repository; this.origins = origins; this.json = json; this.clock = clock;
     }
     public NotificationRepository.Submission submit(String client, NotificationRequest request) {
+        return submit(client, request, repository.newDeadline());
+    }
+    public NotificationRepository.Submission submit(String client, NotificationRequest request, Deadline deadline) {
         var normalized = normalize(request);
-        return repository.insert(client, normalized, fingerprint(normalized), null, clock.instant());
+        return repository.insert(client, normalized, fingerprint(normalized), null, clock.instant(), deadline);
     }
-    public Map<String,Object> get(String client, UUID id) {
-        var result = view(repository.get(client, id)); result.put("history", repository.attempts(id)); return result;
+    public Map<String,Object> get(String client, UUID id, Deadline deadline) {
+        var result = view(repository.get(client, id, deadline)); result.put("history", repository.attempts(id, deadline)); return result;
     }
-    public List<Map<String,Object>> failed(String client, int limit, int offset) {
+    public List<Map<String,Object>> failed(String client, int limit, int offset, Deadline deadline) {
         if (limit < 1 || limit > 100 || offset < 0) throw new ApiException(400, "invalid_pagination");
-        return repository.failed(client, limit, offset).stream().map(this::view).toList();
+        return repository.failed(client, limit, offset, deadline).stream().map(this::view).toList();
     }
-    public NotificationRepository.Submission replay(String client, UUID id, String requestId) {
-        var original = repository.get(client, id);
+    public NotificationRepository.Submission replay(String client, UUID id, String requestId, Deadline deadline) {
+        var original = repository.get(client, id, deadline);
         if (!original.status().equals("failed")) throw new ApiException(409, "only_failed_tasks_can_be_replayed");
         var request = normalize(new NotificationRequest(requestId, original.url(), original.method(), original.headers(), original.body()));
-        return repository.insert(client, request, fingerprint(request), original.id(), clock.instant());
+        return repository.insert(client, request, fingerprint(request), original.id(), clock.instant(), deadline);
     }
     public Map<String,Object> view(NotificationRepository.Job job) {
         var view = new LinkedHashMap<String,Object>();

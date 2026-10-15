@@ -26,6 +26,8 @@ public class ApiAccessFilter extends OncePerRequestFilter {
         request.setAttribute("clientId", client);
         byte[] bytes = request.getInputStream().readNBytes(MAX_ENVELOPE + 1);
         if (bytes.length > MAX_ENVELOPE) { error(response, 413, "request_too_large"); return; }
+        // Upload time is outside the agreed processing budget. Parsing and all DB calls share it.
+        request.setAttribute("deadline", Deadline.after(properties.apiTimeout()).reserving(DatabaseOperations.RESPONSE_RESERVE));
         var wrapped = new HttpServletRequestWrapper(request) {
             @Override public ServletInputStream getInputStream() {
                 var input = new ByteArrayInputStream(bytes);

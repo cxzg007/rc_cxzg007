@@ -45,4 +45,12 @@ class RetryPolicyTest {
         assertEquals(now.plusSeconds(7200), policy.decide(1, now, now,
             new DeliveryResult(503, "Wed Oct 14 02:00:00 2026", "http_503", true)).retryAt());
     }
+    @Test void leapSecondRetryAfterWaitsUntilTheFollowingMinute() {
+        var beforeLeap = Instant.parse("2016-12-31T23:58:00Z");
+        for (String header : new String[]{"Sat, 31 Dec 2016 23:59:60 GMT",
+                "Saturday, 31-Dec-16 23:59:60 GMT", "Sat Dec 31 23:59:60 2016"}) {
+            assertEquals(Instant.parse("2017-01-01T00:00:00Z"), policy.decide(1, beforeLeap, beforeLeap,
+                new DeliveryResult(503, header, "http_503", true)).retryAt(), header);
+        }
+    }
 }

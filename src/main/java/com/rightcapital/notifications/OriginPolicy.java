@@ -2,6 +2,7 @@ package com.rightcapital.notifications;
 
 import org.springframework.stereotype.Component;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -23,8 +24,10 @@ public final class OriginPolicy {
     }
     private URI parse(String value) {
         try {
-            if (value == null || value.length() > 4096) throw new IllegalArgumentException();
+            if (value == null || value.length() > 4096 || !StandardCharsets.UTF_8.newEncoder().canEncode(value))
+                throw new IllegalArgumentException();
             var uri = URI.create(value);
+            if ("".equals(uri.getRawQuery())) throw new ApiException(400, "empty_query_not_supported");
             if (uri.getHost() == null || uri.getRawUserInfo() != null || uri.getRawFragment() != null
                 || uri.getScheme() == null || !Set.of("http", "https").contains(uri.getScheme().toLowerCase(Locale.ROOT))
                 || uri.getPort() == 0 || uri.getPort() > 65535) throw new IllegalArgumentException();

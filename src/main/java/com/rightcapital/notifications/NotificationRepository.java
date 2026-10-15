@@ -3,7 +3,6 @@ package com.rightcapital.notifications;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.PlatformTransactionManager;
-import org.springframework.transaction.support.TransactionTemplate;
 import tools.jackson.databind.json.JsonMapper;
 import java.sql.*;
 import java.time.Instant;
@@ -17,15 +16,17 @@ public class NotificationRepository {
     public record Submission(Job job, boolean created) {}
     public record Claim(Job job, UUID leaseToken, int attempt) {}
 
-    private final JdbcTemplate jdbc;
-    private final TransactionTemplate transaction;
+    private final DatabaseOperations database;
     private final JsonMapper json;
     private final NotificationProperties properties;
     public NotificationRepository(JdbcTemplate jdbc, PlatformTransactionManager manager, JsonMapper json, NotificationProperties properties) {
-        this.jdbc = jdbc; this.transaction = new TransactionTemplate(manager); this.json = json; this.properties = properties;
+        this.database = new DatabaseOperations(jdbc, manager, properties); this.json = json; this.properties = properties;
     }
-    public Submission insert(String client, NotificationRequest request, String fingerprint, UUID replayOf, Instant now) {
-        return transaction.execute(tx -> {
+    public Deadline newDeadline() {
+        return Deadline.after(properties.apiTimeout()).reserving(DatabaseOperations.RESPONSE_RESERVE);
+    }
+    public Submission insert(String client, NotificationRequest request, String fingerprint, UUID replayOf, Instant now, Deadline deadline) {
+        return database.execute(deadline, jdbc -> {
             var id = UUID.randomUUID();
             int added = jdbc.update("""
                 INSERT INTO notifications(id,client_id,request_id,fingerprint,url,method,headers,body,status,created_at,updated_at,next_attempt_at,replay_of)
@@ -38,25 +39,27 @@ public class NotificationRepository {
             return new Submission(stored, added == 1);
         });
     }
-    public Job get(String client, UUID id) {
-        return jdbc.query("SELECT * FROM notifications WHERE id=? AND client_id=?", this::map, id, client)
-            .stream().findFirst().orElseThrow(() -> new ApiException(404, "notification_not_found"));
+    public Job get(String client, UUID id) { return get(client, id, newDeadline()); }
+    public Job get(String client, UUID id, Deadline deadline) {
+        return database.execute(deadline, jdbc -> jdbc.query("SELECT * FROM notifications WHERE id=? AND client_id=?", this::map, id, client)
+            .stream().findFirst().orElseThrow(() -> new ApiException(404, "notification_not_found")));
     }
-    public List<Job> failed(String client, int limit, int offset) {
-        return jdbc.query("SELECT * FROM notifications WHERE client_id=? AND status='failed' ORDER BY created_at DESC,id LIMIT ? OFFSET ?",
-            this::map, client, limit, offset);
+    public List<Job> failed(String client, int limit, int offset, Deadline deadline) {
+        return database.execute(deadline, jdbc -> jdbc.query("SELECT * FROM notifications WHERE client_id=? AND status='failed' ORDER BY created_at DESC,id LIMIT ? OFFSET ?",
+            this::map, client, limit, offset));
     }
-    public List<Map<String,Object>> attempts(UUID id) {
-        return jdbc.query("SELECT number,started_at,finished_at,outcome,status_code,error FROM attempts WHERE notification_id=? ORDER BY number", (rs, row) -> {
+    public List<Map<String,Object>> attempts(UUID id) { return attempts(id, newDeadline()); }
+    public List<Map<String,Object>> attempts(UUID id, Deadline deadline) {
+        return database.execute(deadline, jdbc -> jdbc.query("SELECT number,started_at,finished_at,outcome,status_code,error FROM attempts WHERE notification_id=? ORDER BY number", (rs, row) -> {
             var view = new LinkedHashMap<String,Object>();
             view.put("number", rs.getInt("number")); view.put("started_at", instant(rs, "started_at"));
             view.put("finished_at", instant(rs, "finished_at")); view.put("outcome", rs.getString("outcome"));
             view.put("status_code", rs.getObject("status_code")); view.put("error", rs.getString("error")); return view;
-        }, id);
+        }, id));
     }
 
     public Optional<Claim> claim(Instant now) {
-        return transaction.execute(tx -> {
+        return database.execute(newDeadline(), jdbc -> {
             var candidates = jdbc.query("""
                 SELECT * FROM notifications
                 WHERE (status='pending' AND next_attempt_at<=?) OR (status='processing' AND lease_until<=?)
@@ -88,7 +91,7 @@ public class NotificationRepository {
         });
     }
     public boolean complete(Claim claim, DeliveryResult result, RetryPolicy.Decision decision, Instant now) {
-        return Boolean.TRUE.equals(transaction.execute(tx -> {
+        return Boolean.TRUE.equals(database.execute(newDeadline(), jdbc -> {
             String status = decision.success() ? "succeeded" : decision.retryAt() == null ? "failed" : "pending";
             // Updating by token fences database writes only; it cannot retract a sent HTTP request.
             int changed = jdbc.update("""

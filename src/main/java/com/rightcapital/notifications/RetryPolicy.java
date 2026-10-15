@@ -56,6 +56,13 @@ public final class RetryPolicy {
             if (seconds.compareTo(BigInteger.valueOf(maxAge.toSeconds())) > 0) return Instant.MAX;
             return now.plusSeconds(seconds.longValue());
         }
+        boolean leapSecond = text.contains("23:59:60");
+        var parsed = httpDate(leapSecond ? text.replace("23:59:60", "23:59:59") : text, now);
+        // Instant has no distinct leap second; wait until the following minute rather than retry early.
+        return parsed == null ? null : leapSecond ? parsed.plusSeconds(1) : parsed;
+    }
+
+    private Instant httpDate(String text, Instant now) {
         try { return ZonedDateTime.parse(text, DateTimeFormatter.RFC_1123_DATE_TIME).toInstant(); }
         catch (RuntimeException ignored) { /* RFC 9110 also requires the two obsolete HTTP-date forms. */ }
         try {

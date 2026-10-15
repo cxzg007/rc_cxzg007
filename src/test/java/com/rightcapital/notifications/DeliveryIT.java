@@ -22,7 +22,7 @@ import static org.junit.jupiter.api.Assertions.*;
     "spring.datasource.url=${TEST_DB_URL:jdbc:postgresql://127.0.0.1:15432/notification_test}",
     "spring.datasource.username=${TEST_DB_USER:postgres}", "spring.datasource.password=${TEST_DB_PASSWORD:}",
     "notify.worker-enabled=false", "notify.clients.business=key-a", "notify.request-timeout=200ms",
-    "notify.lease-duration=1s", "notify.max-attempts=3", "notify.max-age=1h", "notify.backoff-base=20ms", "notify.backoff-cap=100ms"})
+    "notify.lease-duration=1s", "notify.max-attempts=3", "notify.max-age=1h", "notify.backoff-base=20ms", "notify.backoff-cap=100ms", "notify.api-timeout=1500ms"})
 @Import(DeliveryIT.TimeConfiguration.class)
 class DeliveryIT {
     static final HttpServer supplier;
@@ -72,6 +72,8 @@ class DeliveryIT {
     @Autowired PlatformTransactionManager transactions;
     @Autowired JsonMapper json;
     @Autowired NotificationProperties config;
+    @Autowired DeliveryClient client;
+    @Autowired RetryPolicy retry;
 
     @BeforeEach void reset() { jdbc.execute("TRUNCATE attempts, notifications CASCADE"); status.set(204); delayMillis.set(0); received.clear(); clock.reset(); }
     @AfterAll static void stop() { supplier.stop(0); serverThreads.shutdownNow(); }
@@ -122,6 +124,23 @@ class DeliveryIT {
         assertEquals("failed", get(expired.id()).status()); assertEquals(0, get(expired.id()).attempts());
         assertEquals(3, received.size());
     }
+    @Test void ageBudgetCrossedDuringClaimPreventsTheHttpRequest() {
+        var job = submit();
+        var delayedRepository = new NotificationRepository(jdbc, transactions, json, config) {
+            @Override public Optional<Claim> claim(Instant now) {
+                var claimed = super.claim(now);
+                clock.advance(3600);
+                return claimed;
+            }
+        };
+        var delayedWorker = new DeliveryWorker(delayedRepository, client, retry, config, clock);
+        try { delayedWorker.runOne(); } finally { delayedWorker.close(); }
+        assertTrue(received.isEmpty(), "A claim completed at the deadline must not contact the supplier");
+        assertEquals("failed", get(job.id()).status());
+        assertEquals("age_budget_exhausted", get(job.id()).lastError());
+        assertEquals(1, get(job.id()).attempts());
+        assertEquals("failed", repository.attempts(job.id()).get(0).get("outcome"));
+    }
     @Test void crashedClaimIsRecoveredAndOldTokenCannotOverwriteNewClaim() {
         var job = submit(); var old = repository.claim(clock.instant()).orElseThrow();
         assertTrue(repository.claim(clock.instant()).isEmpty()); clock.advance(2);
@@ -166,5 +185,26 @@ class DeliveryIT {
         assertEquals("unknown", repository.attempts(job.id()).get(2).get("outcome"));
         assertTrue(received.isEmpty());
         assertFalse(repository.complete(last, new DeliveryResult(204, null, null, false), new RetryPolicy.Decision(true, null, null), clock.instant()));
+    }
+    @Test void blockedResultWriteRollsBackHistoryAndRecoversByLease() throws Exception {
+        var job = submit(); var claim = repository.claim(clock.instant()).orElseThrow();
+        var result = client.send(claim); assertEquals(204, result.statusCode());
+        var decision = new RetryPolicy.Decision(true, null, null);
+        var pool = Executors.newSingleThreadExecutor();
+        try (var lock = jdbc.getDataSource().getConnection()) {
+            lock.setAutoCommit(false);
+            try (var statement = lock.createStatement()) { statement.execute("LOCK TABLE attempts IN ACCESS EXCLUSIVE MODE"); }
+            try {
+                var completion = pool.submit(() -> repository.complete(claim, result, decision, clock.instant()));
+                var failure = assertThrows(ExecutionException.class, () -> completion.get(2500, TimeUnit.MILLISECONDS));
+                assertInstanceOf(org.springframework.dao.DataAccessException.class, failure.getCause());
+                assertEquals("processing", get(job.id()).status());
+            } finally { lock.rollback(); }
+        } finally { pool.shutdownNow(); }
+        assertEquals("processing", repository.attempts(job.id()).get(0).get("outcome"));
+        clock.advance(2); worker.runOne();
+        assertEquals("succeeded", get(job.id()).status()); assertEquals(2, received.size());
+        assertEquals("unknown", repository.attempts(job.id()).get(0).get("outcome"));
+        assertFalse(repository.complete(claim, result, decision, clock.instant()));
     }
 }

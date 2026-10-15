@@ -1,69 +1,84 @@
 # 验证记录
 
-首次验证日期：2026-10-14；提交前复验日期：2026-10-15。环境：macOS arm64、Temurin JDK 17.0.19、Maven 3.9.16、PostgreSQL 17.11、Spring Boot 4.1.1。
+日期：2026-10-15。环境：macOS arm64、Temurin JDK 17.0.19、Maven 3.9.16、PostgreSQL 17.11、Spring Boot 4.1.1。
 
-2026-10-15 从正式提交清单复制 36 个文件到独立临时目录，重新构建并运行完整验证与数据库断连实验。37 项测试全部通过，两条验证命令均以 0 退出；应用崩溃恢复和数据库断连恢复均通过。以下单元/集成测试与这两个进程实验的结果已在本次复验中确认；中断清理、缺失 JAR、模拟供应商各端点和原问题的修复前对照实验记录来自 2026-10-14。
-
-完整命令：`bash scripts/verify.sh -s .local/maven-settings.xml`。本机直连 Maven Central 存在 DNS 超时，因此验证使用本地 Maven 镜像配置；该配置不包含凭据、不属于运行依赖，也不要求其他机器复用。
+本轮针对 code review 的 7 项发现补充失败回归并修正；独立复核还补充了“调用前已中断，不应启动 HTTP 传输”的修复。验证范围是本地 PostgreSQL、HTTP/TLS 和打包应用，不代表真实供应商、生产负载或任意故障下的时限保证。
 
 ## 复现路径
 
-准备 JDK 17、Maven、Python 3 和原生 PostgreSQL 17 后，在仓库根目录运行：
+准备 JDK 17、Maven、Python 3 和原生 PostgreSQL 17，在仓库根目录运行：
 
 ```bash
 bash scripts/verify.sh
 python3 scripts/verify_storage_outage.py
 ```
 
-第一条命令在未设置 TEST_DB_URL 时创建临时数据库，运行单元与集成测试，并启动打包应用验证强制终止后的恢复；若显式设置 TEST_DB_URL，则必须使用可清空的测试数据库。第二条始终使用自己创建的临时数据库，验证停止/重启数据库后的接口行为；即使环境中设置了 TEST_DB_URL，也不会操作该地址。两条命令正常结束时停止自己启动的进程并清理临时数据。PG_BIN 可指定 PostgreSQL 工具目录，Maven 镜像参数按 README 透传。
+第一条命令在未设置 TEST_DB_URL 时创建临时数据库，执行单元/集成测试，并启动打包应用验证强制终止后的恢复。若显式设置 TEST_DB_URL，必须使用可清空的测试数据库。第二条始终创建自己的临时数据库，实际停止/重启它，不操作 TEST_DB_URL 指向的数据库。两条命令正常结束后均清理自己启动的进程和数据库。
 
-第一条正常退出时，测试报告合计 37 项（16 项单元测试、21 项集成测试），最后输出 `packaged_app=passed`、`crash_recovery=passed`，本次运行观察到供应商收到 2 次。第二条正常退出时输出 `storage_outage=passed`、`offline_post=503`、`offline_get=503`、`same_key_retry=200`。详细应用日志保存在 target 目录。仅执行 `mvn test` 会运行单元测试，不包含数据库集成测试和进程实验。
+本机 Maven Central 直连存在 DNS 超时，实际构建使用 `bash scripts/verify.sh -s .local/maven-settings.xml`。镜像配置不含凭据，也不属于仓库内容；其他环境按需透传自己的 Maven 参数。仅运行 `mvn test` 不包含数据库集成测试和进程实验。
 
-| 建议观察的场景 | 实际检查位置 | 可以证明什么 |
+## 修复前后的对照
+
+| 发现 | 修复前证据 | 修复后检查 |
 | --- | --- | --- |
-| 多个调用方提交，相同 request_id 重复提交 | `NotificationApiIT` | 调用方隔离、同键去重、不同内容冲突，受理失败不会伪装成 202 |
-| 供应商暂时失败、永久失败和超时 | `DeliveryIT`、`RetryPolicyTest` | 分类重试、退避和预算边界；超时可能发生在供应商已收到之后 |
-| 供应商收到请求后强制终止应用，再启动 | [smoke.py](../scripts/smoke.py) | 实际进程恢复、租约过期、旧尝试 unknown 和可能重复送达 |
-| 运行中停止数据库，再恢复 | [verify_storage_outage.py](../scripts/verify_storage_outage.py) | 统一脱敏 503、原受理任务保留、恢复后同键重试 |
+| 已获得数据库连接后没有操作预算 | 真实表锁、多阶段读取、提交阻塞 3 项新增回归均在调用方等候期限内未返回 | 表锁返回脱敏 503；任务/历史读取共享截止时间；提交阻塞返回 503，连接池活动借用数回到 0 |
+| JDK 内部重试重新计时 | 1 秒预算内，第一次连接延迟 600ms 后断开，第二次再延迟 600ms 返回 204；原实现仍报成功 | 返回 http_timeout；真实 socket 检查超时/中断后的连接关闭 |
+| 非法 Unicode URL 被数据库替换 | 高、低孤立代理字符经 API 接受后被替换成 `?` | 入口返回 400，不写入；中文、emoji、普通 query 和编码字符保留 |
+| 领取过程跨过任务年龄期限 | 真实领取完成后推进测试时钟，原 worker 仍联系供应商 | 无供应商请求，任务和本次历史原子记录为 age_budget_exhausted |
+| 明确 TLS 拒绝被重试 | 6 种 fatal alert 的新增测试均错误返回 retryable | illegal_parameter、access_denied、decode_error、decrypt_error、missing_extension、unsupported_extension 均终止；临时 TLS 故障仍可重试 |
+| 空 query 分隔符被丢掉 | `/hook?` 实际发送成 `/hook` | 按提交者选择返回 400 empty_query_not_supported |
+| 闰秒 Retry-After 被忽略 | 23:59:60 被当成无效日期，本地退避早于供应商期限 | 三种 HTTP 日期形式均等待至下一分钟 |
+| 已中断线程仍启动异步 HTTP | 新增边界测试确认预中断时仍调用 sendAsync | 不启动传输，保留中断标志；受控 future 另验证取消与响应完成竞争时关闭 body |
 
-这些场景对应故障契约；本地供应商返回 2xx 不能证明真实供应商的后续业务结果。
+修复过程也发现异常映射测试需要适配 Controller 新增的 Deadline 参数，已修正测试请求属性和服务桩，并增加预算耗尽异常的 503 检查。
 
-## 本次验证结果
+## 自动测试与故障实验
 
-| 检查 | 结果 |
+| 检查 | 数量与覆盖 |
 | --- | --- |
-| ApiErrorHandlerTest | 5 项通过；数据库访问、事务建立、提交、回滚异常返回脱敏 503，普通应用错误不会被误报为数据库故障 |
-| RetryPolicyTest | 9 项通过 |
-| DeliveryTlsTest | 2 项通过；真实 TLS 临时错误后成功、未受信任证书拒绝 |
-| NotificationApiIT | 9 项通过 |
-| DeliveryIT | 10 项通过 |
-| DeliveryDispatchIT | 2 项通过 |
-| Maven 打包 | 成功生成可执行 JAR |
-| 打包应用强制终止与重启 | 通过；供应商收到 2 次，最终 succeeded，第一次尝试记录为 unknown |
-| 打包应用遇到数据库断开与恢复 | 独立脚本通过；断开后的提交与查询均返回 503 storage_unavailable，恢复后可提交，同键重试返回 200，原任务保留 |
-| 数据库故障脚本被中断 | 分别发送 SIGTERM、SIGINT，返回 143、130；确认所启动的 Java、PostgreSQL 均退出，临时数据目录清理 |
-| 外部 PostgreSQL 环境干扰 | 修复前两个脚本均在 createdb 阶段被无效 PGHOSTADDR 干扰；修复后注入无效 PGHOSTADDR 与 PGSERVICE，完整验证和数据库故障脚本均通过 |
-| 待提交源码的独立副本 | 通过；不带 target、.local、.env 或 .git，重新构建并通过 37 项测试、应用崩溃恢复和数据库故障脚本 |
-| 模拟供应商脚本 | /ok、/flaky、/permanent-fail、/retry-after 行为通过运行检查 |
-| 独立代码复核 | 原边界问题修正后，定向复核未发现新的实质问题 |
-| 新增验证脚本的独立复核 | 环境变量隔离、终止清理两项发现已修正，并完成定向静态复核；动态实验由实现方执行 |
+| ApiErrorHandlerTest | 6 项；访问、预算、事务建立、提交/回滚异常的脱敏响应，以及普通程序错误不误报为数据库故障 |
+| RetryPolicyTest | 10 项；错误分类、次数/年龄预算、退避、三种日期与闰秒 |
+| DeliveryTlsTest | 8 项；真实 TLS 临时错误恢复、未受信任证书、明确协议/访问拒绝 |
+| OriginPolicyTest | 3 项；Unicode、空 query、合法 URL 保留 |
+| DeliveryDeadlineTest | 6 项；内部重试总时限、响应体关闭、超时/中断取消、预中断、响应完成竞争 |
+| NotificationApiIT | 14 项；鉴权、并发幂等、调用方隔离、重放、请求边界、表锁、多次读取共预算、提交阻塞 |
+| DeliveryIT | 12 项；准确转发、重试、领取/年龄边界、租约/token、原子写回及写回锁超时恢复 |
+| DeliveryDispatchIT | 3 项；并发槽位、领取异常/锁超时后的槽位释放 |
+| DatabaseBudgetIT | 4 项；多 SQL 累计预算、上游耗时、池耗尽、池中所有连接的读取/SQL 超时设置恢复 |
 
-共 37 个自动测试，0 失败、0 错误、0 跳过。完整脚本使用独立临时 PostgreSQL 数据目录，结束后停止数据库并清理目录。补充脚本的缺失 JAR 分支已检查，返回非零退出码并提示先构建。补充脚本的中断清理实验在 Java 与 PostgreSQL 均已启动时执行，不代表 SIGKILL 或机器掉电时仍能自动清理。
+汇总为 **66 项：33 项单元测试、33 项集成测试，0 失败、0 错误、0 跳过**。提交前最终结果由下方独立副本验证确认。
 
-复核推动修正了临时 TLS 错误分类、旧式 HTTP 日期、JSON 转义后的入口体积边界，并补充并发重放、槽位释放及末次领取崩溃测试。另拒绝无法无损编码为 UTF-8 的 body，避免内容被静默替换。
+`taskReadAndHistoryReadShareOneDeadline` 会在第二次借用余量不足时提前拒绝，因此证明的是同一截止时间及保守准入；`DatabaseBudgetIT.sequentialSqlStatementsShareTheRemainingTime` 才是两条真实 SQL 的累计预算检查。两者没有混为一项保证。
 
-随后补充事务异常映射：修复前新增回归测试中，事务建立、提交、回滚 3 个分支失败；修复后 5 项全部通过。错误处理测试在服务边界注入故障，检查真实 Controller 与异常处理器的 HTTP 响应；另使用打包应用及独立临时 PostgreSQL，实际停止并重启数据库验证断连与恢复。该实验现已整理为 `scripts/verify_storage_outage.py`，需独立执行，不属于 `scripts/verify.sh` 的固定步骤。尚未模拟真实数据库提交确认丢失，因此调用方仍需按文档使用相同 request_id 重试。
+提交阻塞使用延迟执行的 PostgreSQL 约束触发器，验证 COMMIT 等待有界、池借用释放和同键重试。**未模拟“数据库已经提交成功、仅提交确认丢失”的网络故障**，因此不声称证明了该故障窗口的所有行为；API 仍将其视为不确定结果。
 
-## 可复现性与限制
+打包应用实验：`scripts/smoke.py` 在供应商收到请求后强制终止应用，再启动恢复，检查第一次尝试为 unknown、最终 succeeded，以及可能重复接收。`scripts/verify_storage_outage.py` 实际停止/重启独立 PostgreSQL，检查断连后 POST/GET 返回脱敏 503、原任务保留、恢复后同键重试返回 200。
 
-以 `git ls-files --cached --others --exclude-standard` 列出的正式提交文件为清单，复制工作区当前内容到临时目录；检查不包含原始 PDF、日历、过程草案、.env、.local、代码索引或已有 target。副本中重新构建并依次运行上述两个命令，均以 0 退出。验证使用本机已安装的工具链、Maven 缓存，以及通过 `-s` 显式传入的镜像配置；没有把该结果表述为全新机器或空依赖缓存安装成功。
+## 本地耗时参考
 
-本次正式副本验证包含 36 个文件，并注入无效的 PGHOSTADDR 和 PGSERVICE 以复验隔离。2026-10-14 的较早副本还包含 3 份过程草案，因此当时文件数为 39。本次复验后仅补充文档中的验证结果。正式文档的 18 处本地链接均可解析，`git diff --check` 通过。
+本轮使用打包应用、临时 PostgreSQL 和本地供应商，worker 开启，单个调用方顺序发送；每种请求先预热 5 次，再记录 30 次。时间包含客户端 JSON 序列化和 HTTP 往返。结果单位为毫秒：
 
-## GitHub 托管 CI
+| Body | 修复前 p50 / p95 | 修复后 p50 / p95 |
+| --- | --- | --- |
+| 1 KiB | 2.254 / 3.415 | 2.628 / 4.317 |
+| 1 MiB | 13.876 / 19.239 | 14.461 / 19.997 |
 
-2026-10-15，提交 `82c02f58a8386cc1d08f090486fe24ee0d02a70d` 的 [verify 工作流](https://github.com/cxzg007/rc_cxzg007/actions/runs/38704151052) 执行成功。环境为 GitHub Ubuntu runner、Temurin JDK 17 和 PostgreSQL 17 service container，实际执行 `bash scripts/verify.sh`。
+这是本地小样本参考，不是压测、性能因果对照或生产百分位校准。不能据此证明 5 秒预算与 100/200ms 预留最优；代表性负载下的端到端分布、池争用和各阶段耗时仍需后续观察。当前未新增监控平台。
 
-云端日志确认：16 项单元测试、21 项集成测试全部通过，0 失败、0 错误、0 跳过；Maven 构建成功，打包应用输出 `packaged_app=passed`、`crash_recovery=passed`，观察到 2 次尝试和 2 次供应商接收。该工作流未执行独立的数据库断连脚本；数据库断连恢复依据上文的本地实验记录。
+## 最终独立副本验证
 
-未在真实供应商或 Docker Compose 环境执行；CI 中的 PostgreSQL service container 不等同于验证本项目的 Compose 启动路径。生产负载、长期运行和数据库灾难恢复不在本次验证范围。
+从 `git ls-files --cached --others --exclude-standard` 列出的 41 个正式文件复制工作区内容到临时目录，不带 target、.local、.env、.git、原始 PDF、日历或过程草案。使用本机工具链、Maven 缓存和显式传入的镜像配置，重新构建并执行上述两条命令；另注入无效 PGHOSTADDR 和 PGSERVICE 检查脚本环境隔离。
+
+两条命令均以 0 退出：66 项测试通过、Maven 构建成功；打包应用输出 `packaged_app=passed`、`crash_recovery=passed`，观察到 2 次尝试和 2 次供应商接收。数据库故障实验输出 `storage_outage=passed`、`offline_post=503`、`offline_get=503`、`recovery=passed`、`same_key_retry=200`、`accepted_task_retained=true`。
+
+已比对副本与工作区，源码、测试、配置和脚本内容一致；此后仅补充文档结果。正式文档 16 处本地链接可解析，`git diff --check` 通过。独立只读复核确认本轮修正已落实，没有遗留修正项；动态测试由实现方执行。没有把本机缓存环境表述成全新机器或空缓存安装成功。
+
+## 托管 CI 与验证限制
+
+仓库的 `.github/workflows/ci.yml` 使用 GitHub Ubuntu runner、Temurin JDK 17 和 PostgreSQL 17 service，执行 `bash scripts/verify.sh`；独立数据库断连脚本需要另行执行。
+
+早期提交 `82c02f58a8386cc1d08f090486fe24ee0d02a70d` 的托管验证已通过当时的 37 项测试及应用崩溃恢复。这是历史记录，不作为本轮修复的验证结果。本轮提交的云端结果在推送后单独确认。
+
+2026-10-14 已检查故障脚本的 SIGINT/SIGTERM 清理、缺失 JAR 分支和模拟供应商端点；这些历史检查未冒充本轮重新执行。SIGKILL 或机器掉电下的脚本清理不在保证范围。
+
+未在真实供应商或 Docker Compose 启动路径执行；CI 的 PostgreSQL service container 不等同于 Compose 启动验证。生产负载、长期运行、数据库灾难恢复，以及任意故障下严格的 HTTP 响应期限均不在本轮验证范围。

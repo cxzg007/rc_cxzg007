@@ -39,7 +39,9 @@ public class DeliveryWorker {
             var optional = repository.claim(clock.instant());
             if (optional.isEmpty()) return;
             var claim = optional.get();
-            var result = client.send(claim);
+            // Claiming can wait on the database; the timestamp passed into claim is no longer current.
+            var result = clock.instant().isBefore(claim.job().createdAt().plus(properties.maxAge()))
+                ? client.send(claim) : new DeliveryResult(null, null, "age_budget_exhausted", false);
             var now = clock.instant();
             var decision = retry.decide(claim.attempt(), claim.job().createdAt(), now, result);
             boolean applied = repository.complete(claim, result, decision, now);

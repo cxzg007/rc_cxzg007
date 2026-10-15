@@ -19,7 +19,7 @@ import static org.junit.jupiter.api.Assertions.*;
     "spring.datasource.url=${TEST_DB_URL:jdbc:postgresql://127.0.0.1:15432/notification_test}",
     "spring.datasource.username=${TEST_DB_USER:postgres}", "spring.datasource.password=${TEST_DB_PASSWORD:}",
     "notify.worker-enabled=false", "notify.clients.business=key-a", "notify.concurrency=2",
-    "notify.request-timeout=5s", "notify.lease-duration=10s"})
+    "notify.request-timeout=5s", "notify.lease-duration=10s", "notify.api-timeout=1500ms"})
 class DeliveryDispatchIT {
     static final HttpServer supplier;
     static final ExecutorService httpThreads = Executors.newCachedThreadPool();
@@ -56,7 +56,7 @@ class DeliveryDispatchIT {
     DeliveryWorker dispatcher() {
         var p = properties;
         var enabled = new NotificationProperties(p.clients(), p.allowedOrigins(), true, p.concurrency(), p.maxAttempts(), p.maxAge(),
-            p.requestTimeout(), p.leaseDuration(), p.backoffBase(), p.backoffCap());
+            p.requestTimeout(), p.leaseDuration(), p.backoffBase(), p.backoffCap(), p.apiTimeout());
         return new DeliveryWorker(repository, client, retry, enabled, Clock.systemUTC());
     }
     void submit(int count) {
@@ -97,5 +97,22 @@ class DeliveryDispatchIT {
             await(() -> { worker.dispatch(); return succeeded() == 2; });
             assertEquals(2, jdbc.queryForObject("SELECT count(*) FROM attempts", Integer.class));
         } finally { worker.close(); }
+    }
+    @Test void blockedClaimTransactionsReleaseAllWorkerSlots() throws Exception {
+        submit(2); release.countDown(); var worker = dispatcher();
+        try (var lock = jdbc.getDataSource().getConnection()) {
+            lock.setAutoCommit(false);
+            try (var statement = lock.createStatement()) { statement.execute("LOCK TABLE attempts IN ACCESS EXCLUSIVE MODE"); }
+            try {
+                worker.dispatch();
+                await(() -> blockedClaims() == 2);
+                await(() -> blockedClaims() == 0);
+            } finally { lock.rollback(); }
+            assertEquals(0, jdbc.queryForObject("SELECT count(*) FROM attempts", Integer.class));
+            await(() -> { worker.dispatch(); return succeeded() == 2; });
+        } finally { worker.close(); }
+    }
+    int blockedClaims() {
+        return jdbc.queryForObject("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'INSERT INTO attempts%'", Integer.class);
     }
 }
