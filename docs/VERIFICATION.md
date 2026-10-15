@@ -77,7 +77,9 @@ python3 scripts/verify_storage_outage.py
 
 仓库的 `.github/workflows/ci.yml` 使用 GitHub Ubuntu runner、Temurin JDK 17 和 PostgreSQL 17 service，执行 `bash scripts/verify.sh`；独立数据库断连脚本需要另行执行。
 
-早期提交 `82c02f58a8386cc1d08f090486fe24ee0d02a70d` 的托管验证已通过当时的 37 项测试及应用崩溃恢复。这是历史记录，不作为本轮修复的验证结果。本轮提交的云端结果在推送后单独确认。
+2026-10-15，本轮修复提交 `b55407a879122bf5abe0d8145101cd52ef45e1c1` 的 [verify 工作流](https://github.com/cxzg007/rc_cxzg007/actions/runs/38715829972) 执行成功。云端日志确认 33 项单元测试、33 项集成测试全部通过，Maven 构建成功，打包应用输出 `packaged_app=passed`、`crash_recovery=passed`，观察到 2 次尝试与 2 次供应商接收。本段在结果确认后补记，仅涉及文档。
+
+早期提交 `82c02f58a8386cc1d08f090486fe24ee0d02a70d` 的托管验证曾通过当时的 37 项测试及应用崩溃恢复；该历史结果不代替本轮验证。独立数据库断连脚本的结果来自上文的本地实验，未表述为已在 CI 中执行。
 
 2026-10-14 已检查故障脚本的 SIGINT/SIGTERM 清理、缺失 JAR 分支和模拟供应商端点；这些历史检查未冒充本轮重新执行。SIGKILL 或机器掉电下的脚本清理不在保证范围。
 
